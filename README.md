@@ -21,7 +21,7 @@ backend
 pin-service
    |
    v
-Kubo API (127.0.0.1:5001)
+Kubo API (127.0.0.1:5001 or host bridge, e.g. 10.0.1.1:5001)
    |
    v
 IPFS network
@@ -44,7 +44,7 @@ IPFS network
 - `PORT`：默认 `4100`
 - `HOST`：默认 `127.0.0.1`
 - `PIN_SERVICE_TOKEN`：可选，若设置则所有接口都要求 `Authorization: Bearer <token>`
-- `KUBO_API_URL`：默认 `http://127.0.0.1:5001`
+- `KUBO_API_URL`：默认 `http://127.0.0.1:5001`，若 pin-service 运行在容器中且 Kubo 运行在宿主机上，则改为宿主机 bridge 地址，例如 `http://10.0.1.1:5001`
 - `KUBO_REQUEST_TIMEOUT_MS`：单次 Kubo API 请求超时，默认 `1800000`（30 分钟）
 - `DATA_ROOT`：可选，默认优先 `/data`，否则 `./data`
 - `PIN_DB_PATH`：可选，默认 `${DATA_ROOT}/pin-service.sqlite`
@@ -166,10 +166,53 @@ PIN_SERVICE_TOKEN=replace-me
 
 建议 Kubo 至少满足：
 
-- API 监听在 `127.0.0.1:5001`
+- API 监听在受控地址上
+- 同机部署时可使用 `127.0.0.1:5001`
+- 容器访问宿主机 Kubo 时，应监听宿主机 bridge 地址，例如 `10.0.1.1:5001`
+- 不要把 Kubo API 监听到公网地址，也不要直接配置 `0.0.0.0:5001`
 - 节点能够连接外部 IPFS 网络
 - 节点已经设置合适的 `StorageMax`，例如 `200GB`
 - Swarm 端口对公网可达，方便成为 provider
+
+## 当前部署记录
+
+当前单节点部署的关键约束如下：
+
+- Kubo 由 `systemd` 托管，服务名是 `ipfs`
+- Kubo 进程用户是 `ipfs`
+- `IPFS_PATH=/data/ipfs/.ipfs`
+- Kubo API 当前监听 `10.0.1.1:5001`
+- Kubo Gateway 当前监听 `127.0.0.1:8181`
+- Swarm 当前监听公网 `4001/tcp` 和 `4001/udp`
+- pin-service 如果运行在 Docker 自定义 bridge `br-a815c5d4820d` 上，应通过 `http://10.0.1.1:5001` 访问宿主机 Kubo API
+
+### 重要说明
+
+- 直接执行 `ipfs ...` 时，CLI 默认会去找当前用户的默认 repo 路径
+- 以 `root` 直接执行 `ipfs id` 会尝试读取 `/root/.ipfs`，并报 `no IPFS repo found in /root/.ipfs`
+- 在这台机器上，正确做法是显式指定运行用户和 `IPFS_PATH`
+
+例如：
+
+```bash
+sudo -u ipfs env IPFS_PATH=/data/ipfs/.ipfs ipfs id
+sudo -u ipfs env IPFS_PATH=/data/ipfs/.ipfs ipfs swarm peers | head
+sudo -u ipfs env IPFS_PATH=/data/ipfs/.ipfs ipfs pin ls
+```
+
+如果要直接通过 RPC API 调试，应使用当前配置的地址：
+
+```bash
+curl -X POST http://10.0.1.1:5001/api/v0/version
+curl -X POST http://10.0.1.1:5001/api/v0/id
+curl -X POST http://10.0.1.1:5001/api/v0/repo/stat
+```
+
+因此，pin-service 的生产环境变量也应与当前拓扑保持一致，例如：
+
+```env
+KUBO_API_URL=http://10.0.1.1:5001
+```
 
 ## 当前实现边界
 

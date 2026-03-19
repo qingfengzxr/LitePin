@@ -58,11 +58,17 @@ const scheduleFailureOrRetry = (job: PinRequestRecord, err: any) => {
   if (retriable && job.attempts < MAX_RETRIES) {
     const nextRetryAt = computeNextRetryAt(job.attempts);
     markPinRequestRetry(job.id, message, code, nextRetryAt);
-    logger.warn({ requestId: job.id, cid: job.cid, errorCode: code, nextRetryAt }, '[pin-worker] scheduled retry');
+    logger.warn(
+      { requestId: job.id, cid: job.cid, attempts: job.attempts, errorCode: code, nextRetryAt, message },
+      '[pin-worker] scheduled retry'
+    );
     return;
   }
   markPinRequestFailed(job.id, message, code);
-  logger.error({ requestId: job.id, cid: job.cid, errorCode: code }, '[pin-worker] pin request marked failed');
+  logger.error(
+    { requestId: job.id, cid: job.cid, attempts: job.attempts, errorCode: code, message },
+    '[pin-worker] pin request marked failed'
+  );
 };
 
 export class PinWorker {
@@ -98,7 +104,10 @@ export class PinWorker {
         return;
       }
       activeJob = job;
-      logger.info({ requestId: job.id, cid: job.cid, attempts: job.attempts }, '[pin-worker] processing pin request');
+      logger.info(
+        { requestId: job.id, cid: job.cid, attempts: job.attempts, concurrency: CONCURRENCY },
+        '[pin-worker] processing pin request'
+      );
       const alreadyPinned = await isPinnedInKubo(job.cid);
       if (!alreadyPinned) {
         await assertRepoHasCapacity();
@@ -116,7 +125,10 @@ export class PinWorker {
           err
         );
       }
-      logger.error({ err }, '[pin-worker] pin request failed');
+      logger.error(
+        { err, requestId: activeJob?.id, cid: activeJob?.cid, attempts: activeJob?.attempts != null ? activeJob.attempts + 1 : undefined },
+        '[pin-worker] pin request failed'
+      );
     }
   }
 }

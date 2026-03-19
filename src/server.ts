@@ -52,7 +52,17 @@ app.post('/pins', requireAuth, (req, res) => {
     const address = typeof req.body?.address === 'string' ? req.body.address.trim() : null;
     const storageType = typeof req.body?.storageType === 'string' ? req.body.storageType.trim() : null;
     const record = createOrReusePinRequest({ cid, source, address, storageType });
-    logger.info({ requestId: record.id, cid: record.cid, status: record.status }, '[pin-service] pin request accepted');
+    logger.info(
+      {
+        requestId: record.id,
+        cid: record.cid,
+        status: record.status,
+        source: record.source,
+        address: record.address,
+        storageType: record.storageType
+      },
+      '[pin-service] pin request accepted'
+    );
     return sendJson(res, {
       ok: true,
       requestId: record.id,
@@ -92,6 +102,15 @@ app.get('/stats', requireAuth, async (_req, res) => {
     const repo = await getKuboRepoStat();
     const acceptingNewPins =
       !repo.storageMaxBytes || repo.storageMaxBytes <= 0 ? true : repo.repoSizeBytes / repo.storageMaxBytes < MAX_REPO_USAGE_RATIO;
+    logger.info(
+      {
+        repoSizeBytes: repo.repoSizeBytes,
+        storageMaxBytes: repo.storageMaxBytes,
+        pinnedCount: getPinnedCount(),
+        acceptingNewPins
+      },
+      '[pin-service] stats requested'
+    );
     return sendJson(res, {
       storageMaxBytes: repo.storageMaxBytes,
       repoSizeBytes: repo.repoSizeBytes,
@@ -118,5 +137,5 @@ logger.info(
 new PinWorker().start();
 
 app.listen(port, host, () => {
-  logger.info(`Pin service listening on http://${host}:${port}`);
+  logger.info({ host, port }, '[pin-service] listening');
 });
