@@ -8,7 +8,14 @@ import {
   getPinRequestById,
   getPinnedCount
 } from './pinStore.js';
-import { getKuboRepoStat } from './kuboClient.js';
+import {
+  getCidFromGateway,
+  getGatewayReadableStream,
+  getKuboGatewayBaseUrl,
+  getKuboRepoStat,
+  headCidFromGateway,
+  isPinnedInKubo
+} from './kuboClient.js';
 import { MAX_REPO_USAGE_RATIO, PinWorker } from './pinWorker.js';
 
 const app = express();
@@ -41,6 +48,15 @@ const normalizeCid = (value: unknown) => {
     throw new Error('invalid cid');
   }
   return cid;
+};
+
+const copyGatewayHeaders = (gatewayResponse: Response, res: express.Response) => {
+  for (const header of ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified', 'content-disposition']) {
+    const value = gatewayResponse.headers.get(header);
+    if (value) {
+      res.setHeader(header, value);
+    }
+  }
 };
 
 app.get('/health', (_req, res) => sendJson(res, { ok: true }));
@@ -123,13 +139,96 @@ app.get('/stats', requireAuth, async (_req, res) => {
   }
 });
 
+app.head('/ipfs/:cid', requireAuth, async (req, res) => {
+  try {
+    const cid = normalizeCid(req.params.cid);
+    const gatewayResponse = await headCidFromGateway(cid);
+    copyGatewayHeaders(gatewayResponse, res);
+    logger.info(
+      { cid, statusCode: gatewayResponse.status, gatewayUrl: getKuboGatewayBaseUrl() },
+      '[pin-service] gateway HEAD request completed'
+    );
+    return res.status(gatewayResponse.status).end();
+  } catch (err: any) {
+    logger.warn({ err, cid: req.params.cid }, '[pin-service] gateway HEAD request failed');
+    return sendJson(res, { error: err?.message || 'Failed to read CID from gateway' }, 502);
+  }
+});
+
+app.get('/ipfs/:cid', requireAuth, async (req, res) => {
+  try {
+    const cid = normalizeCid(req.params.cid);
+    const gatewayResponse = await getCidFromGateway(cid);
+    copyGatewayHeaders(gatewayResponse, res);
+    res.status(gatewayResponse.status);
+    logger.info(
+      { cid, statusCode: gatewayResponse.status, gatewayUrl: getKuboGatewayBaseUrl() },
+      '[pin-service] gateway GET request completed'
+    );
+    if (!gatewayResponse.ok || !gatewayResponse.body) {
+      const body = await gatewayResponse.text();
+      return res.send(body);
+    }
+    const stream = getGatewayReadableStream(gatewayResponse);
+    if (!stream) {
+      return res.end();
+    }
+    stream.on('error', (err) => {
+      logger.warn({ err, cid }, '[pin-service] gateway stream failed');
+      if (!res.headersSent) {
+        res.status(502).end('Gateway stream failed');
+        return;
+      }
+      res.destroy(err);
+    });
+    stream.pipe(res);
+  } catch (err: any) {
+    logger.warn({ err, cid: req.params.cid }, '[pin-service] gateway GET request failed');
+    return sendJson(res, { error: err?.message || 'Failed to stream CID from gateway' }, 502);
+  }
+});
+
+app.get('/probe/:cid', requireAuth, async (req, res) => {
+  try {
+    const cid = normalizeCid(req.params.cid);
+    const pinned = await isPinnedInKubo(cid);
+    const gatewayResponse = await headCidFromGateway(cid);
+    const readable = gatewayResponse.ok;
+    const result = {
+      cid,
+      pinned,
+      readable,
+      statusCode: gatewayResponse.status,
+      contentType: gatewayResponse.headers.get('content-type'),
+      contentLength: gatewayResponse.headers.get('content-length'),
+      gatewayUrl: getKuboGatewayBaseUrl()
+    };
+    logger.info(result, '[pin-service] CID probe completed');
+    return sendJson(res, result);
+  } catch (err: any) {
+    logger.warn({ err, cid: req.params.cid }, '[pin-service] CID probe failed');
+    return sendJson(
+      res,
+      {
+        cid: req.params.cid,
+        pinned: false,
+        readable: false,
+        error: err?.message || 'Failed to probe CID',
+        gatewayUrl: getKuboGatewayBaseUrl()
+      },
+      502
+    );
+  }
+});
+
 logger.info(
   {
     dataRoot,
     logDir: getLogDir(),
     logFile: getLogFile(),
     pinDbPath: getPinDbPath(),
-    kuboApiUrl: process.env.KUBO_API_URL || 'http://127.0.0.1:5001'
+    kuboApiUrl: process.env.KUBO_API_URL || 'http://127.0.0.1:5001',
+    kuboGatewayUrl: process.env.KUBO_GATEWAY_URL || 'http://127.0.0.1:8181'
   },
   '[pin-service] resolved persistent storage paths'
 );

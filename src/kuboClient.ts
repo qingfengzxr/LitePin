@@ -1,9 +1,12 @@
+import { Readable } from 'stream';
+
 type RepoStat = {
   RepoSize?: number;
   StorageMax?: number;
 };
 
 const getKuboApiUrl = () => (process.env.KUBO_API_URL?.trim() || 'http://127.0.0.1:5001').replace(/\/+$/, '');
+const getKuboGatewayUrl = () => (process.env.KUBO_GATEWAY_URL?.trim() || 'http://127.0.0.1:8181').replace(/\/+$/, '');
 const REQUEST_TIMEOUT_MS = Number(process.env.KUBO_REQUEST_TIMEOUT_MS || 30 * 60 * 1000);
 
 const parseStorageMax = (value: unknown): number | null => {
@@ -61,4 +64,32 @@ export const getKuboRepoStat = async () => {
     repoSizeBytes: typeof body.RepoSize === 'number' ? body.RepoSize : 0,
     storageMaxBytes: parseStorageMax(body.StorageMax)
   };
+};
+
+export const getKuboGatewayBaseUrl = () => getKuboGatewayUrl();
+
+const kuboGatewayFetch = async (cid: string, method: 'GET' | 'HEAD') => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(`${getKuboGatewayUrl()}/ipfs/${encodeURIComponent(cid)}`, { method, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Kubo gateway request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+export const headCidFromGateway = async (cid: string) => kuboGatewayFetch(cid, 'HEAD');
+
+export const getCidFromGateway = async (cid: string) => kuboGatewayFetch(cid, 'GET');
+
+export const getGatewayReadableStream = (response: Response) => {
+  if (!response.body) {
+    return null;
+  }
+  return Readable.fromWeb(response.body as globalThis.ReadableStream);
 };
