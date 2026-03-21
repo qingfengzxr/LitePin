@@ -21,6 +21,8 @@ export type PinRequestRecord = {
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  provideAttempts: number;
+  providedAt: string | null;
 };
 
 type PinRequestRow = {
@@ -39,6 +41,8 @@ type PinRequestRow = {
   updated_at: string;
   started_at: string | null;
   completed_at: string | null;
+  provide_attempts: number;
+  provided_at: string | null;
 };
 
 const defaultDbPath = resolveDataPath('pin-service.sqlite');
@@ -63,7 +67,9 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    provide_attempts INTEGER NOT NULL DEFAULT 0,
+    provided_at TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_pin_requests_status_updated_at
@@ -83,6 +89,12 @@ if (!pinRequestColumns.some((column) => column.name === 'next_retry_at')) {
 if (!pinRequestColumns.some((column) => column.name === 'last_polled_at')) {
   db.exec(`ALTER TABLE pin_requests ADD COLUMN last_polled_at TEXT`);
 }
+if (!pinRequestColumns.some((column) => column.name === 'provide_attempts')) {
+  db.exec(`ALTER TABLE pin_requests ADD COLUMN provide_attempts INTEGER NOT NULL DEFAULT 0`);
+}
+if (!pinRequestColumns.some((column) => column.name === 'provided_at')) {
+  db.exec(`ALTER TABLE pin_requests ADD COLUMN provided_at TEXT`);
+}
 
 const toRecord = (row: PinRequestRow): PinRequestRecord => ({
   id: row.id,
@@ -99,14 +111,16 @@ const toRecord = (row: PinRequestRow): PinRequestRecord => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   startedAt: row.started_at,
-  completedAt: row.completed_at
+  completedAt: row.completed_at,
+  provideAttempts: row.provide_attempts,
+  providedAt: row.provided_at
 });
 
 const insertStmt = db.prepare(`
   INSERT INTO pin_requests (
     id, cid, source, address, storage_type, status, error, error_code, attempts, next_retry_at, last_polled_at,
-    created_at, updated_at, started_at, completed_at
-  ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL)
+    created_at, updated_at, started_at, completed_at, provide_attempts, provided_at
+  ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, 0, NULL)
 `);
 
 const resetFailedStmt = db.prepare(`
@@ -121,21 +135,21 @@ const resetFailedStmt = db.prepare(`
 
 const getByIdStmt = db.prepare(`
   SELECT id, cid, source, address, storage_type, status, error, error_code, attempts, next_retry_at, last_polled_at,
-         created_at, updated_at, started_at, completed_at
+         created_at, updated_at, started_at, completed_at, provide_attempts, provided_at
   FROM pin_requests
   WHERE id = ?
 `);
 
 const getByCidStmt = db.prepare(`
   SELECT id, cid, source, address, storage_type, status, error, error_code, attempts, next_retry_at, last_polled_at,
-         created_at, updated_at, started_at, completed_at
+         created_at, updated_at, started_at, completed_at, provide_attempts, provided_at
   FROM pin_requests
   WHERE cid = ?
 `);
 
 const getNextRunnableStmt = db.prepare(`
   SELECT id, cid, source, address, storage_type, status, error, error_code, attempts, next_retry_at, last_polled_at,
-         created_at, updated_at, started_at, completed_at
+         created_at, updated_at, started_at, completed_at, provide_attempts, provided_at
   FROM pin_requests
   WHERE (status = 'queued' AND (next_retry_at IS NULL OR next_retry_at <= ?))
      OR (status = 'pinning' AND updated_at <= ?)
@@ -164,6 +178,15 @@ const markPinnedStmt = db.prepare(`
       next_retry_at = NULL,
       last_polled_at = ?,
       completed_at = ?,
+      provided_at = ?,
+      updated_at = ?
+  WHERE id = ?
+`);
+
+const markProvideAttemptStmt = db.prepare(`
+  UPDATE pin_requests
+  SET provide_attempts = provide_attempts + 1,
+      last_polled_at = ?,
       updated_at = ?
   WHERE id = ?
 `);
@@ -249,9 +272,14 @@ const claimNextRunnableTxn = db.transaction((staleBefore: string) => {
 
 export const claimNextRunnablePinRequest = (staleBefore: string): PinRequestRecord | null => claimNextRunnableTxn(staleBefore);
 
-export const markPinRequestPinned = (id: string) => {
+export const markPinRequestProvideAttempt = (id: string) => {
   const now = new Date().toISOString();
-  markPinnedStmt.run(now, now, now, id);
+  markProvideAttemptStmt.run(now, now, id);
+};
+
+export const markPinRequestPinned = (id: string, providedAt?: string | null) => {
+  const now = new Date().toISOString();
+  markPinnedStmt.run(now, now, providedAt ?? null, now, id);
 };
 
 export const markPinRequestRetry = (id: string, error: string, errorCode: string, nextRetryAt: string) => {

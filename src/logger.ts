@@ -55,7 +55,10 @@ const createRotatingStream = (filePath: string, maxSize: number) => {
 };
 
 const logger = pino(
-  { level: process.env.LOG_LEVEL || 'info' },
+  {
+    level: process.env.LOG_LEVEL || 'info',
+    timestamp: pino.stdTimeFunctions.isoTime
+  },
   multistream([{ stream: process.stdout }, { stream: createRotatingStream(logFile, maxBytes) }])
 );
 

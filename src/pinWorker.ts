@@ -3,10 +3,11 @@ import {
   claimNextRunnablePinRequest,
   type PinRequestRecord,
   markPinRequestFailed,
+  markPinRequestProvideAttempt,
   markPinRequestPinned,
   markPinRequestRetry
 } from './pinStore.js';
-import { getKuboRepoStat, isPinnedInKubo, pinCidInKubo } from './kuboClient.js';
+import { getKuboRepoStat, isPinnedInKubo, pinCidInKubo, provideCidInKubo } from './kuboClient.js';
 
 const POLL_INTERVAL_MS = Number(process.env.PIN_WORKER_POLL_MS || 5_000);
 const CONCURRENCY = Math.max(1, Number(process.env.PIN_WORKER_CONCURRENCY || 1));
@@ -14,6 +15,7 @@ const MAX_RETRIES = Number(process.env.PIN_MAX_RETRIES || 3);
 const BASE_RETRY_DELAY_MS = Number(process.env.PIN_BASE_RETRY_MS || 15_000);
 const RUNNING_STALE_MS = Number(process.env.PIN_RUNNING_STALE_MS || 60 * 60 * 1000);
 export const MAX_REPO_USAGE_RATIO = Number(process.env.PIN_MAX_REPO_USAGE_RATIO || 0.9);
+const PROVIDE_AFTER_PIN = String(process.env.PIN_PROVIDE_AFTER_PIN || 'true').trim().toLowerCase() !== 'false';
 
 const computeNextRetryAt = (attempts: number) => {
   const delay = Math.min(30 * 60 * 1000, BASE_RETRY_DELAY_MS * Math.pow(2, Math.max(0, attempts - 1)));
@@ -34,6 +36,9 @@ const classifyError = (err: any): { code: string; retriable: boolean; message: s
   }
   if (normalized.includes('not found') || normalized.includes('merkledag') || normalized.includes('blockservice')) {
     return { code: 'cid_unavailable', retriable: true, message };
+  }
+  if (normalized.includes('provide') || normalized.includes('routing')) {
+    return { code: 'provide_failed', retriable: true, message };
   }
   return { code: 'pin_failed', retriable: false, message };
 };
@@ -113,8 +118,19 @@ export class PinWorker {
         await assertRepoHasCapacity();
         await pinCidInKubo(job.cid);
       }
-      markPinRequestPinned(job.id);
-      logger.info({ requestId: job.id, cid: job.cid }, '[pin-worker] pin request completed');
+      let providedAt: string | null = null;
+      let provideAttempts = job.provideAttempts;
+      if (PROVIDE_AFTER_PIN) {
+        markPinRequestProvideAttempt(job.id);
+        provideAttempts += 1;
+        await provideCidInKubo(job.cid);
+        providedAt = new Date().toISOString();
+      }
+      markPinRequestPinned(job.id, providedAt);
+      logger.info(
+        { requestId: job.id, cid: job.cid, alreadyPinned, provided: PROVIDE_AFTER_PIN, providedAt, provideAttempts },
+        '[pin-worker] pin request completed'
+      );
     } catch (err: any) {
       if (activeJob) {
         scheduleFailureOrRetry(

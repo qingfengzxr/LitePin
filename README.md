@@ -55,6 +55,7 @@ IPFS network
 - `PIN_BASE_RETRY_MS`：首次重试退避，默认 `15000`
 - `PIN_RUNNING_STALE_MS`：多久把卡住的 `pinning` 请求视为可恢复，默认 `3600000`（1 小时）
 - `PIN_MAX_REPO_USAGE_RATIO`：repo 使用率阈值，默认 `0.9`
+- `PIN_PROVIDE_AFTER_PIN`：是否在 `pin/add` 成功后再调用 Kubo `routing/provide` 主动 announce，默认 `true`
 
 建议直接复制 `.env.example` 为 `.env`。
 
