@@ -1,86 +1,135 @@
-# SuperIdea Pin Service
+# LitePin
 
-一个独立的内部服务，用来给 `backend` 提供自建 IPFS 的 `pin by CID` 能力。
+LitePin is an open-source pinning service that provides a simple, self-hostable pin service API for `pin by CID` workflows on top of Kubo.
 
-它的职责很简单：
+It is designed for teams that want:
 
-- 接收 backend 发来的 `cid`；
-- 生成本地 `requestId`；
-- 通过 Kubo API 执行 `pin/add`；
-- 提供 `GET /pins/:requestId` 状态查询；
-- 提供 `GET /stats` 查看 repo 使用情况。
+- a lightweight HTTP API for submitting pin requests;
+- durable local persistence with SQLite;
+- background job execution with retries and stale-job recovery;
+- gateway and probe endpoints for CID verification;
+- a deployment model simple enough to run on a single node or private network.
 
-这个服务默认只面向内网或本机，不应该直接暴露公网。
+LitePin is intentionally small. It focuses on a clean operational model rather than multi-tenant billing, dashboards, or hosted-platform complexity.
 
-## 架构
+## Architecture
 
 ```text
-backend
-   |
-   v
-pin-service
-   |
-   v
-Kubo API (127.0.0.1:5001 or host bridge, e.g. 10.0.1.1:5001)
-   |
-   v
-IPFS network
+client / upstream service
+        |
+        v
+LitePin API (Fastify + TypeBox)
+        |
+        +--> SQLite request store
+        |
+        +--> Pin worker
+                |
+                v
+             Kubo API
+                |
+                v
+            IPFS network
 ```
 
-## 功能
+## Features
 
-- `POST /pins`
-- `GET /pins/:requestId`
-- `GET /stats`
-- 本地 SQLite 持久化 pin 请求
-- 后台 worker 串行消费 pin 请求
-- 同 CID 去重
-- 请求超时、自动重试、stale job 恢复
-- 基于 repo 使用率的简单容量阈值保护
-- 可选 Bearer Token 鉴权
+- `POST /pins` to enqueue or reuse a pin request by CID
+- `GET /pins/:requestId` to query request status
+- `GET /stats` for repository capacity and pinned object summary
+- `GET /ipfs/:cid` and `HEAD /ipfs/:cid` as a thin gateway passthrough
+- `GET /probe/:cid` to check pin state and gateway readability
+- `GET /healthz` and `GET /readyz` for liveness and readiness checks
+- `GET /docs` for OpenAPI/Swagger documentation
+- `GET /diagnostics/worker`, `GET /diagnostics/queue`, `GET /diagnostics/dependencies`
+- `GET /metrics` for Prometheus-style metrics
+- SQLite-backed durable queue state
+- background worker with retries and stale-job reclaim
+- optional Bearer token protection
+- structured logging with `pino`
 
-## 环境变量
+## Project Structure
 
-- `PORT`：默认 `4100`
-- `HOST`：默认 `127.0.0.1`
-- `PIN_SERVICE_TOKEN`：可选，若设置则所有接口都要求 `Authorization: Bearer <token>`
-- `KUBO_API_URL`：默认 `http://127.0.0.1:5001`，若 pin-service 运行在容器中且 Kubo 运行在宿主机上，则改为宿主机 bridge 地址，例如 `http://10.0.1.1:5001`
-- `KUBO_REQUEST_TIMEOUT_MS`：单次 Kubo API 请求超时，默认 `1800000`（30 分钟）
-- `DATA_ROOT`：可选，默认优先 `/data`，否则 `./data`
-- `PIN_DB_PATH`：可选，默认 `${DATA_ROOT}/pin-service.sqlite`
-- `LOG_DIR` / `LOG_FILE`：可选，默认 `${DATA_ROOT}/logs` 和 `${DATA_ROOT}/logs/pin-service.log`
-- `PIN_WORKER_POLL_MS`：后台轮询间隔，默认 `5000`
-- `PIN_WORKER_CONCURRENCY`：并发 pin worker 数，默认 `1`
-- `PIN_MAX_RETRIES`：单个请求最大尝试次数，默认 `3`
-- `PIN_BASE_RETRY_MS`：首次重试退避，默认 `15000`
-- `PIN_RUNNING_STALE_MS`：多久把卡住的 `pinning` 请求视为可恢复，默认 `3600000`（1 小时）
-- `PIN_MAX_REPO_USAGE_RATIO`：repo 使用率阈值，默认 `0.9`
-- `PIN_PROVIDE_AFTER_PIN`：是否在 `pin/add` 成功后再调用 Kubo `routing/provide` 主动 announce，默认 `true`
+```text
+src/
+  app/
+    buildApp.ts
+    dto/
+    plugins/
+    routes/
+  clients/
+    kuboClient.ts
+  domain/
+    errors.ts
+    pinRequest.ts
+  infra/
+    config.ts
+    loadEnv.ts
+    logger.ts
+    storagePaths.ts
+  repositories/
+    pinRepository.ts
+  services/
+    gatewayService.ts
+    healthService.ts
+    pinService.ts
+  workers/
+    pinWorker.ts
+    runtime.ts
+  server.ts
+```
 
-建议直接复制 `.env.example` 为 `.env`。
+## Environment Variables
 
-## 开发
+- `PORT`: default `4100`
+- `HOST`: default `127.0.0.1`
+- `API_PREFIX`: default `/api/v1`
+- `OPENAPI_TITLE`: default `LitePin API`
+- `OPENAPI_VERSION`: default package version or `0.1.0`
+- `PIN_SERVICE_TOKEN`: optional Bearer token for protected endpoints
+- `KUBO_API_URL`: default `http://127.0.0.1:5001`
+- `KUBO_GATEWAY_URL`: default `http://127.0.0.1:8181`
+- `KUBO_REQUEST_TIMEOUT_MS`: default `1800000`
+- `DATA_ROOT`: default `/data` if present, otherwise `./data`
+- `PIN_DB_PATH`: default `${DATA_ROOT}/pin-service.sqlite`
+- `LOG_DIR`: default `${DATA_ROOT}/logs`
+- `LOG_FILE`: default `${DATA_ROOT}/logs/litepin.log`
+- `LOG_LEVEL`: default `info`
+- `PIN_WORKER_POLL_MS`: default `5000`
+- `PIN_WORKER_CONCURRENCY`: default `1`
+- `PIN_WORKER_IDLE_LOG_MS`: default `600000`
+- `PIN_MAX_RETRIES`: default `3`
+- `PIN_BASE_RETRY_MS`: default `15000`
+- `PIN_RUNNING_STALE_MS`: default `3600000`
+- `PIN_MAX_REPO_USAGE_RATIO`: default `0.9`
+- `PIN_PROVIDE_AFTER_PIN`: default `true`
+- `SHUTDOWN_GRACE_MS`: default `15000`
+
+Copy `.env.example` to `.env` to get started.
+
+## Development
 
 ```bash
-cd /Users/cooper/Programming/git_home/SuperIdea/pin-service
+cd LitePin
 npm install
+npm test
 npm run dev
 ```
 
-## 生产
+## Production
 
 ```bash
-cd /Users/cooper/Programming/git_home/SuperIdea/pin-service
+cd LitePin
 npm install
 npm run build
+npm test
 npm start
 ```
 
 ## API
 
-### `POST /pins`
+### `POST /api/v1/pins`
 
-请求：
+Request:
 
 ```json
 {
@@ -91,7 +140,7 @@ npm start
 }
 ```
 
-返回：
+Response:
 
 ```json
 {
@@ -99,20 +148,18 @@ npm start
   "requestId": "pin-1742399999999-ab12cd",
   "cid": "bafy...",
   "status": "queued",
-  "error": null
+  "error": null,
+  "errorCode": null,
+  "attempts": 0,
+  "nextRetryAt": null,
+  "provideAttempts": 0,
+  "providedAt": null
 }
 ```
 
-说明：
+### `GET /api/v1/pins/:requestId`
 
-- 同一个 CID 重复提交时会复用已有记录；
-- worker 拉起后会把状态更新为 `pinning` 或 `pinned`；
-- 如果 Kubo 超时、短暂不可达或 CID 暂时不可用，会按退避策略自动重试；
-- 超过最大尝试次数后才会进入 `failed`。
-
-### `GET /pins/:requestId`
-
-返回：
+Response:
 
 ```json
 {
@@ -122,20 +169,17 @@ npm start
   "error": null,
   "errorCode": null,
   "attempts": 1,
-  "nextRetryAt": null
+  "nextRetryAt": null,
+  "startedAt": "2026-03-26T10:00:00.000Z",
+  "completedAt": "2026-03-26T10:00:05.000Z",
+  "provideAttempts": 1,
+  "providedAt": "2026-03-26T10:00:06.000Z"
 }
 ```
 
-状态取值：
+### `GET /api/v1/stats`
 
-- `queued`
-- `pinning`
-- `pinned`
-- `failed`
-
-### `GET /stats`
-
-返回：
+Response:
 
 ```json
 {
@@ -146,106 +190,80 @@ npm start
 }
 ```
 
-## 与 backend 的对接
+### `GET /readyz`
 
-在 `backend/.env` 里配置：
+Response:
 
-```env
-BACKUP_ENABLED=true
-PIN_PROVIDER=selfhosted-ipfs
-PIN_SERVICE_URL=http://127.0.0.1:4100
-PIN_SERVICE_TOKEN=replace-me
+```json
+{
+  "ok": true,
+  "checks": {
+    "database": true,
+    "kuboApi": true,
+    "worker": true
+  }
+}
 ```
 
-这样 backend 的 `BackupWorker` 会：
+### `GET /docs`
 
-- `POST /pins`
-- 记录返回的 `requestId`
-- 之后持续 `GET /pins/:requestId`
+Serves Swagger UI for the LitePin OpenAPI specification.
 
-## Kubo 要求
+### `GET /docs/json`
 
-建议 Kubo 至少满足：
+Returns the machine-readable OpenAPI JSON document for the public API.
 
-- API 监听在受控地址上
-- 同机部署时可使用 `127.0.0.1:5001`
-- 容器访问宿主机 Kubo 时，应监听宿主机 bridge 地址，例如 `10.0.1.1:5001`
-- 不要把 Kubo API 监听到公网地址，也不要直接配置 `0.0.0.0:5001`
-- 节点能够连接外部 IPFS 网络
-- 节点已经设置合适的 `StorageMax`，例如 `200GB`
-- Swarm 端口对公网可达，方便成为 provider
+### `GET /diagnostics/worker`
 
-## 当前部署记录
+Returns worker runtime state, concurrency settings, and idle-log diagnostics.
 
-当前单节点部署的关键约束如下：
+### `GET /diagnostics/queue`
 
-- Kubo 由 `systemd` 托管，服务名是 `ipfs`
-- Kubo 进程用户是 `ipfs`
-- `IPFS_PATH=/data/ipfs/.ipfs`
-- Kubo API 当前监听 `10.0.1.1:5001`
-- Kubo Gateway 当前监听 `127.0.0.1:8181`
-- Swarm 当前监听公网 `4001/tcp` 和 `4001/udp`
-- pin-service 如果运行在 Docker 自定义 bridge `br-a815c5d4820d` 上，应通过 `http://10.0.1.1:5001` 访问宿主机 Kubo API
+Returns queue counts and queue-age timestamps for `queued`, `pinning`, `pinned`, and `failed` jobs.
 
-### 重要说明
+### `GET /diagnostics/dependencies`
 
-- 直接执行 `ipfs ...` 时，CLI 默认会去找当前用户的默认 repo 路径
-- 以 `root` 直接执行 `ipfs id` 会尝试读取 `/root/.ipfs`，并报 `no IPFS repo found in /root/.ipfs`
-- 在这台机器上，正确做法是显式指定运行用户和 `IPFS_PATH`
+Returns dependency diagnostics for SQLite, Kubo API, and configured gateway base URL.
 
-例如：
+### `GET /metrics`
 
-```bash
-sudo -u ipfs env IPFS_PATH=/data/ipfs/.ipfs ipfs id
-sudo -u ipfs env IPFS_PATH=/data/ipfs/.ipfs ipfs swarm peers | head
-sudo -u ipfs env IPFS_PATH=/data/ipfs/.ipfs ipfs pin ls
-```
+Returns Prometheus-style metrics including:
 
-如果要直接通过 RPC API 调试，应使用当前配置的地址：
+- HTTP request totals and duration aggregates
+- pin request accepted and reused totals
+- worker completed / failed / retried totals
+- queue size gauges
+- worker state gauges
+- Kubo repo size gauges
 
-```bash
-curl -X POST http://10.0.1.1:5001/api/v0/version
-curl -X POST http://10.0.1.1:5001/api/v0/id
-curl -X POST http://10.0.1.1:5001/api/v0/repo/stat
-```
+## Kubo Requirements
 
-因此，pin-service 的生产环境变量也应与当前拓扑保持一致，例如：
+- Keep the Kubo API on localhost or a private network
+- Do not expose the Kubo API directly to the public internet
+- Configure a realistic `StorageMax`
+- Ensure the node can reach the wider IPFS network
+- If you want strong provider discoverability, make swarm ports reachable
 
-```env
-KUBO_API_URL=http://10.0.1.1:5001
-```
+## Integration Pattern
 
-## 当前实现边界
+LitePin is a good fit when another service needs a clean pinning API but you still want to own the underlying Kubo node.
 
-这是为了尽快打通 `backend -> pin-service -> Kubo` 的最小版本。
+Typical flow:
 
-当前还没有做这些增强能力：
+1. An upstream service calls `POST /pins`
+2. LitePin stores or reuses a request record in SQLite
+3. The background worker claims and executes the pin job
+4. The upstream service polls `GET /pins/:requestId`
+5. Optionally, the upstream service uses `GET /probe/:cid` or `GET /ipfs/:cid`
 
-- 用户级配额
-- 更严格的磁盘字节级配额
-- 并发控制以外的优先级调度
-- 更细粒度的 CID 校验
-- 多节点 Kubo 调度
+## Scope
 
-## 关于并发 pin
+LitePin is intentionally focused. It does not currently include:
 
-现在已经支持安全并发 pin。
+- user-level quotas
+- billing or tenant isolation
+- multi-node Kubo scheduling
+- dashboard UI
+- advanced policy engines
 
-原因是本服务不是把任务“简单提交给 Kubo 就完事”，而是要自己维护：
-
-- 本地 `requestId`
-- 重试次数
-- 超时和 stale 恢复
-- backend 可轮询的状态
-
-Kubo 的 `pin/add` 对调用方来说通常是一个长时间运行的同步请求，不会先返回一个可轮询的远端 job id。所以 `pin-service` 仍然需要自己的任务队列。
-
-为了避免并发 worker 抢到同一条任务，当前实现已经把“取任务 + 标记 pinning”做成 SQLite 事务内的原子 claim，然后再用 `PIN_WORKER_CONCURRENCY` 控制并发度。
-
-建议起步值：
-
-- 小机器：`1`
-- 一般单节点：`2` 或 `3`
-- 不建议一开始就开很大，避免把带宽、磁盘 IO 和 Kubo 连接数打满
-
-这些可以在后续迭代里再补。
+Those can be layered on later, but the core service is meant to stay small, predictable, and easy to self-host.
