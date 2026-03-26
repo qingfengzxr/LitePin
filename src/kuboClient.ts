@@ -1,4 +1,5 @@
 import { Readable } from 'stream';
+import type { ReadableStream as WebReadableStream } from 'stream/web';
 
 type RepoStat = {
   RepoSize?: number;
@@ -91,5 +92,5 @@ export const getGatewayReadableStream = (response: Response) => {
   if (!response.body) {
     return null;
   }
-  return Readable.fromWeb(response.body as globalThis.ReadableStream);
+  return Readable.fromWeb(response.body as unknown as WebReadableStream);
 };
