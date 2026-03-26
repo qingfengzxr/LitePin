@@ -1,5 +1,4 @@
 import { Readable } from 'stream';
-import type { ReadableStream as WebReadableStream } from 'stream/web';
 import type { AppConfig } from '../infra/config.js';
 import type { RepoStats } from '../domain/pinRequest.js';
 
@@ -93,7 +92,7 @@ export class KuboClient {
     if (!response.body) {
       return null;
     }
-    return Readable.fromWeb(response.body as unknown as WebReadableStream);
+    return Readable.fromWeb(response.body as any);
   }
 
   getGatewayBaseUrl() {
