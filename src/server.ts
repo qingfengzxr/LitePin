@@ -69,6 +69,7 @@ const main = async () => {
     void shutdown('SIGTERM');
   });
 
+  logger.info({ host: appConfig.host, port: appConfig.port }, '[litepin] about to listen');
   await app.listen({ host: appConfig.host, port: appConfig.port });
   logger.info({ host: appConfig.host, port: appConfig.port }, '[litepin] listening');
 };
