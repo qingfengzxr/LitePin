@@ -96,23 +96,30 @@ export class PinWorker {
     }
     while (this.activeWorkers < this.config.workerConcurrency) {
       this.activeWorkers += 1;
-      void this.processOne().finally(() => {
-        this.activeWorkers -= 1;
-        if (!this.stopping) {
-          this.pump();
-        }
-      });
+      void this.processOne()
+        .then((claimedJob) => {
+          this.activeWorkers -= 1;
+          if (!this.stopping && claimedJob) {
+            this.pump();
+          }
+        })
+        .catch(() => {
+          this.activeWorkers -= 1;
+          if (!this.stopping) {
+            this.pump();
+          }
+        });
     }
   }
 
-  private async processOne() {
+  private async processOne(): Promise<boolean> {
     let activeJob: PinRequestRecord | null = null;
     try {
       const staleBefore = new Date(Date.now() - this.config.runningStaleMs).toISOString();
       const job = this.repository.claimNextRunnable(staleBefore);
       if (!job) {
         this.logIdle();
-        return;
+        return false;
       }
       this.lastIdleLogAt = 0;
       activeJob = job;
@@ -151,6 +158,7 @@ export class PinWorker {
         { requestId: job.id, cid: job.cid, alreadyPinned, provided: this.config.provideAfterPin, providedAt, provideAttempts },
         '[pin-worker] pin request completed'
       );
+      return true;
     } catch (err: any) {
       if (activeJob) {
         this.scheduleFailureOrRetry(
@@ -165,6 +173,7 @@ export class PinWorker {
         { err, requestId: activeJob?.id, cid: activeJob?.cid, attempts: activeJob?.attempts != null ? activeJob.attempts + 1 : undefined },
         '[pin-worker] pin request failed'
       );
+      return activeJob !== null;
     }
   }
 
