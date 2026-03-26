@@ -4,7 +4,7 @@ import pino, { multistream } from 'pino';
 import { resolveDataPath } from './storagePaths.js';
 
 const logDir = process.env.LOG_DIR || resolveDataPath('logs');
-const logFile = process.env.LOG_FILE || path.join(logDir, 'pin-service.log');
+const logFile = process.env.LOG_FILE || path.join(logDir, 'litepin.log');
 const maxBytes = Number(process.env.LOG_ROTATE_BYTES || 256 * 1024 * 1024);
 
 if (!fs.existsSync(logDir)) {
@@ -29,7 +29,7 @@ const createRotatingStream = (filePath: string, maxSize: number) => {
       stream = null;
     }
     if (fs.existsSync(filePath)) {
-      const rotated = path.join(logDir, `pin-service-${formatTimestamp(new Date())}.log`);
+      const rotated = path.join(logDir, `litepin-${formatTimestamp(new Date())}.log`);
       try {
         fs.renameSync(filePath, rotated);
       } catch {
@@ -55,7 +55,10 @@ const createRotatingStream = (filePath: string, maxSize: number) => {
 };
 
 const logger = pino(
-  { level: process.env.LOG_LEVEL || 'info' },
+  {
+    level: process.env.LOG_LEVEL || 'info',
+    timestamp: pino.stdTimeFunctions.isoTime
+  },
   multistream([{ stream: process.stdout }, { stream: createRotatingStream(logFile, maxBytes) }])
 );
 

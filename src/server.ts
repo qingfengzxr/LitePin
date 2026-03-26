@@ -1,240 +1,79 @@
-import express from 'express';
-import './env.js';
-import logger, { getLogDir, getLogFile } from './logger.js';
-import { dataRoot } from './storagePaths.js';
-import {
-  createOrReusePinRequest,
-  getPinDbPath,
-  getPinRequestById,
-  getPinnedCount
-} from './pinStore.js';
-import {
-  getCidFromGateway,
-  getGatewayReadableStream,
-  getKuboGatewayBaseUrl,
-  getKuboRepoStat,
-  headCidFromGateway,
-  isPinnedInKubo
-} from './kuboClient.js';
-import { MAX_REPO_USAGE_RATIO, PinWorker } from './pinWorker.js';
+import { buildApp } from './app/buildApp.js';
+import { KuboClient } from './clients/kuboClient.js';
+import logger, { getLogDir, getLogFile } from './infra/logger.js';
+import { appConfig } from './infra/config.js';
+import { LitePinMetrics } from './infra/metrics.js';
+import { PinRepository } from './repositories/pinRepository.js';
+import { PinService } from './services/pinService.js';
+import { GatewayService } from './services/gatewayService.js';
+import { HealthService } from './services/healthService.js';
+import { DiagnosticsService } from './services/diagnosticsService.js';
+import { PinWorker } from './workers/pinWorker.js';
+import { WorkerRuntime } from './workers/runtime.js';
 
-const app = express();
-app.use(express.json({ limit: '1mb' }));
+const main = async () => {
+  const metrics = new LitePinMetrics();
+  const repository = new PinRepository(appConfig.pinDbPath);
+  const kuboClient = new KuboClient(appConfig);
+  const pinService = new PinService(repository, kuboClient, appConfig.maxRepoUsageRatio, metrics);
+  const gatewayService = new GatewayService(kuboClient);
+  const pinWorker = new PinWorker(repository, kuboClient, appConfig, metrics);
+  const workerRuntime = new WorkerRuntime(pinWorker);
+  const healthService = new HealthService(repository, kuboClient, workerRuntime);
+  const diagnosticsService = new DiagnosticsService(repository, kuboClient, workerRuntime, metrics, appConfig);
 
-const port = Number(process.env.PORT || 4100);
-const host = process.env.HOST || '127.0.0.1';
-const expectedToken = process.env.PIN_SERVICE_TOKEN?.trim() || '';
-
-const sendJson = (res: express.Response, data: unknown, status = 200) => res.status(status).json(data);
-
-const requireAuth: express.RequestHandler = (req, res, next) => {
-  if (!expectedToken) {
-    return next();
-  }
-  const auth = req.header('authorization') || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length).trim() : '';
-  if (token !== expectedToken) {
-    return sendJson(res, { error: 'Unauthorized' }, 401);
-  }
-  next();
-};
-
-const normalizeCid = (value: unknown) => {
-  const cid = typeof value === 'string' ? value.trim() : '';
-  if (!cid) {
-    throw new Error('cid required');
-  }
-  if (!/^[a-z0-9]+$/i.test(cid) || cid.length > 256) {
-    throw new Error('invalid cid');
-  }
-  return cid;
-};
-
-const copyGatewayHeaders = (gatewayResponse: Response, res: express.Response) => {
-  for (const header of ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified', 'content-disposition']) {
-    const value = gatewayResponse.headers.get(header);
-    if (value) {
-      res.setHeader(header, value);
-    }
-  }
-};
-
-app.get('/health', (_req, res) => sendJson(res, { ok: true }));
-
-app.post('/pins', requireAuth, (req, res) => {
-  try {
-    const cid = normalizeCid(req.body?.cid);
-    const source = typeof req.body?.source === 'string' ? req.body.source.trim() : null;
-    const address = typeof req.body?.address === 'string' ? req.body.address.trim() : null;
-    const storageType = typeof req.body?.storageType === 'string' ? req.body.storageType.trim() : null;
-    const record = createOrReusePinRequest({ cid, source, address, storageType });
-    logger.info(
-      {
-        requestId: record.id,
-        cid: record.cid,
-        status: record.status,
-        source: record.source,
-        address: record.address,
-        storageType: record.storageType
-      },
-      '[pin-service] pin request accepted'
-    );
-    return sendJson(res, {
-      ok: true,
-      requestId: record.id,
-      cid: record.cid,
-      status: record.status,
-      error: record.error,
-      errorCode: record.errorCode,
-      attempts: record.attempts,
-      nextRetryAt: record.nextRetryAt
-    });
-  } catch (err: any) {
-    logger.warn({ err }, '[pin-service] create pin request failed');
-    return sendJson(res, { error: err?.message || 'Failed to create pin request' }, 400);
-  }
-});
-
-app.get('/pins/:requestId', requireAuth, (req, res) => {
-  const record = getPinRequestById(req.params.requestId);
-  if (!record) {
-    return sendJson(res, { error: 'Not found' }, 404);
-  }
-  return sendJson(res, {
-    requestId: record.id,
-    cid: record.cid,
-    status: record.status,
-    error: record.error,
-    errorCode: record.errorCode,
-    attempts: record.attempts,
-    nextRetryAt: record.nextRetryAt,
-    startedAt: record.startedAt,
-    completedAt: record.completedAt
+  const app = await buildApp({
+    config: appConfig,
+    pinService,
+    gatewayService,
+    healthService,
+    diagnosticsService,
+    metrics
   });
-});
 
-app.get('/stats', requireAuth, async (_req, res) => {
-  try {
-    const repo = await getKuboRepoStat();
-    const acceptingNewPins =
-      !repo.storageMaxBytes || repo.storageMaxBytes <= 0 ? true : repo.repoSizeBytes / repo.storageMaxBytes < MAX_REPO_USAGE_RATIO;
-    logger.info(
-      {
-        repoSizeBytes: repo.repoSizeBytes,
-        storageMaxBytes: repo.storageMaxBytes,
-        pinnedCount: getPinnedCount(),
-        acceptingNewPins
-      },
-      '[pin-service] stats requested'
-    );
-    return sendJson(res, {
-      storageMaxBytes: repo.storageMaxBytes,
-      repoSizeBytes: repo.repoSizeBytes,
-      pinnedCount: getPinnedCount(),
-      acceptingNewPins
-    });
-  } catch (err: any) {
-    logger.error({ err }, '[pin-service] stats request failed');
-    return sendJson(res, { error: err?.message || 'Failed to fetch stats' }, 500);
-  }
-});
+  logger.info(
+    {
+      serviceName: appConfig.serviceName,
+      host: appConfig.host,
+      port: appConfig.port,
+      dataRoot: appConfig.dataRoot,
+      logDir: getLogDir(),
+      logFile: getLogFile(),
+      pinDbPath: repository.dbPath,
+      kuboApiUrl: appConfig.kuboApiUrl,
+      kuboGatewayUrl: appConfig.kuboGatewayUrl
+    },
+    '[litepin] resolved runtime configuration'
+  );
 
-app.head('/ipfs/:cid', requireAuth, async (req, res) => {
-  try {
-    const cid = normalizeCid(req.params.cid);
-    const gatewayResponse = await headCidFromGateway(cid);
-    copyGatewayHeaders(gatewayResponse, res);
-    logger.info(
-      { cid, statusCode: gatewayResponse.status, gatewayUrl: getKuboGatewayBaseUrl() },
-      '[pin-service] gateway HEAD request completed'
-    );
-    return res.status(gatewayResponse.status).end();
-  } catch (err: any) {
-    logger.warn({ err, cid: req.params.cid }, '[pin-service] gateway HEAD request failed');
-    return sendJson(res, { error: err?.message || 'Failed to read CID from gateway' }, 502);
-  }
-});
+  workerRuntime.start();
 
-app.get('/ipfs/:cid', requireAuth, async (req, res) => {
-  try {
-    const cid = normalizeCid(req.params.cid);
-    const gatewayResponse = await getCidFromGateway(cid);
-    copyGatewayHeaders(gatewayResponse, res);
-    res.status(gatewayResponse.status);
-    logger.info(
-      { cid, statusCode: gatewayResponse.status, gatewayUrl: getKuboGatewayBaseUrl() },
-      '[pin-service] gateway GET request completed'
-    );
-    if (!gatewayResponse.ok || !gatewayResponse.body) {
-      const body = await gatewayResponse.text();
-      return res.send(body);
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, '[litepin] shutting down');
+    try {
+      await workerRuntime.stop(appConfig.shutdownGraceMs);
+      await app.close();
+      repository.close();
+      logger.info('[litepin] shutdown complete');
+      process.exit(0);
+    } catch (err: any) {
+      logger.error({ err, signal }, '[litepin] shutdown failed');
+      process.exit(1);
     }
-    const stream = getGatewayReadableStream(gatewayResponse);
-    if (!stream) {
-      return res.end();
-    }
-    stream.on('error', (err) => {
-      logger.warn({ err, cid }, '[pin-service] gateway stream failed');
-      if (!res.headersSent) {
-        res.status(502).end('Gateway stream failed');
-        return;
-      }
-      res.destroy(err);
-    });
-    stream.pipe(res);
-  } catch (err: any) {
-    logger.warn({ err, cid: req.params.cid }, '[pin-service] gateway GET request failed');
-    return sendJson(res, { error: err?.message || 'Failed to stream CID from gateway' }, 502);
-  }
-});
+  };
 
-app.get('/probe/:cid', requireAuth, async (req, res) => {
-  try {
-    const cid = normalizeCid(req.params.cid);
-    const pinned = await isPinnedInKubo(cid);
-    const gatewayResponse = await headCidFromGateway(cid);
-    const readable = gatewayResponse.ok;
-    const result = {
-      cid,
-      pinned,
-      readable,
-      statusCode: gatewayResponse.status,
-      contentType: gatewayResponse.headers.get('content-type'),
-      contentLength: gatewayResponse.headers.get('content-length'),
-      gatewayUrl: getKuboGatewayBaseUrl()
-    };
-    logger.info(result, '[pin-service] CID probe completed');
-    return sendJson(res, result);
-  } catch (err: any) {
-    logger.warn({ err, cid: req.params.cid }, '[pin-service] CID probe failed');
-    return sendJson(
-      res,
-      {
-        cid: req.params.cid,
-        pinned: false,
-        readable: false,
-        error: err?.message || 'Failed to probe CID',
-        gatewayUrl: getKuboGatewayBaseUrl()
-      },
-      502
-    );
-  }
-});
+  process.once('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
+  process.once('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
 
-logger.info(
-  {
-    dataRoot,
-    logDir: getLogDir(),
-    logFile: getLogFile(),
-    pinDbPath: getPinDbPath(),
-    kuboApiUrl: process.env.KUBO_API_URL || 'http://127.0.0.1:5001',
-    kuboGatewayUrl: process.env.KUBO_GATEWAY_URL || 'http://127.0.0.1:8181'
-  },
-  '[pin-service] resolved persistent storage paths'
-);
+  await app.listen({ host: appConfig.host, port: appConfig.port });
+  logger.info({ host: appConfig.host, port: appConfig.port }, '[litepin] listening');
+};
 
-new PinWorker().start();
-
-app.listen(port, host, () => {
-  logger.info({ host, port }, '[pin-service] listening');
+void main().catch((err) => {
+  logger.error({ err }, '[litepin] failed to start');
+  process.exit(1);
 });
